@@ -1,0 +1,11 @@
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))
+
+; (test
+;  (name test)
+;  (libraries iva alcotest)
+;  (preprocess
+;   (pps ppx_jane))
+;  (modules test_algebra test_multivariate test))

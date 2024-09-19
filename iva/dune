@@ -1,0 +1,23 @@
+(env
+ (dev
+  (flags
+   (:standard -warn-error -A))))
+
+(library
+ (name util)
+ (modules util)
+ (libraries base zarith fmt))
+
+; (library
+;  (name iva)
+;  (modules univariate multivariate)
+;  (preprocess
+;   (pps ppx_jane ppx_sexp_conv ppx_deriving.show))
+;  (libraries zarith base util fmt))
+
+(library
+ (name algebra)
+ (preprocess
+  (pps ppx_jane ppx_sexp_conv ppx_deriving.show))
+ (modules fld polynomial)
+ (libraries zarith ff base fmt logs logs.fmt))
