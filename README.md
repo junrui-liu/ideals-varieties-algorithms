@@ -14,5 +14,6 @@ Implemented:
   - graded reverse lexicographic
 - Basic algebras on multivariate polynomials
   - +, -, *
-  - long division
-    - rephrased in functional style (much cleaner!)
+  - long division (rephrased in functional style)
+- Gröbner basis
+  - Buchberger's fixed-point algorithm

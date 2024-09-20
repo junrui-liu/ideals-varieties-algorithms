@@ -101,6 +101,10 @@ module Make (Var : VAR) (F : Fld.S) = struct
           Some m
         with Indivisible -> None
 
+      let lcm (m1 : t) (m2 : t) : t =
+        Map.merge m1 m2 ~f:(fun ~key:_ -> function
+          | `Left x | `Right x -> Some x | `Both (x, y) -> Some (max x y))
+
       let vars = Map.keys
 
       let compare_lex : t -> t -> int =
@@ -115,7 +119,7 @@ module Make (Var : VAR) (F : Fld.S) = struct
         let p2 = Map.to_alist m2 ~key_order:`Decreasing in
         let d1 = total_deg m1 in
         let d2 = total_deg m2 in
-        [%compare: int * (Var.t * int) list] (d1, p1) (d2, p2)
+        compare_pair Int.compare [%compare: (Var.t * int) list] (d1, p1) (d2, p2)
 
       let compare_grrevlex : t -> t -> int =
        fun m1 m2 ->
@@ -124,36 +128,41 @@ module Make (Var : VAR) (F : Fld.S) = struct
         let d1 = total_deg m1 in
         let d2 = total_deg m2 in
         [%compare: int * (Var.t * IntRev.t) list] (d1, p1) (d2, p2)
-
-      let compare = compare_lex
     end
 
     include T
-    include Comparator.Make (T)
 
     module Lex = struct
-      include T
+      module T1 = struct
+        include T
 
-      let compare = compare_lex
+        let compare = compare_lex
+      end
 
-      include Comparable.Make (T)
+      include T1
+      include Comparable.Make (T1)
     end
 
     module GrLex = struct
-      include T
+      module T1 = struct
+        include T
 
-      let compare = compare_grlex
+        let compare = compare_grlex
+      end
 
-      include Comparable.Make (T)
+      include T1
+      include Comparable.Make (T1)
     end
 
     module GrRevLex = struct
-      include T
+      module T1 = struct
+        include T
 
-      let compare = compare_grrevlex
+        let compare = compare_grrevlex
+      end
 
-      include T
-      include Comparable.Make (T)
+      include T1
+      include Comparable.Make (T1)
     end
 
     let lex : (t, Lex.comparator_witness) Comparator.Module.t = (module Lex)
@@ -163,11 +172,28 @@ module Make (Var : VAR) (F : Fld.S) = struct
 
     let grrevlex : (t, GrRevLex.comparator_witness) Comparator.Module.t =
       (module GrRevLex)
+
+    type lex = Lex
+    type grlex = GrLex
+    type grrevlex = GrRevLex
   end
 
   module Normal = struct
-    type 'ord t = (Mono.t, F.t, 'ord) Map.t
-    (** A polynomial is a map from monomials to non-zero field coefficients *)
+    module T = struct
+      type 'ord t = (Mono.t, F.t, 'ord) Map.t
+      (** A polynomial is a map from monomials to non-zero field coefficients *)
+      (* | Lex :
+             (Mono.t, F.t, Mono.Lex.comparator_witness) Map.t
+             -> Mono.Lex.comparator_witness t
+         | GrLex :
+             (Mono.t, F.t, Mono.GrLex.comparator_witness) Map.t
+             -> Mono.GrLex.comparator_witness t
+         | GrRevLex :
+             (Mono.t, F.t, Mono.GrRevLex.comparator_witness) Map.t
+             -> Mono.GrRevLex.comparator_witness t *)
+    end
+
+    include T
 
     module Term = struct
       type t = Mono.t * F.t
@@ -189,6 +215,21 @@ module Make (Var : VAR) (F : Fld.S) = struct
       let invariant (t : t) = not F.(snd t = zero)
     end
 
+    let check_terms_ordering (p : 'ord t) =
+      let compare = (Map.comparator p).compare in
+      let terms =
+        Map.to_alist p
+        |> List.sort ~compare:(fun (m1, _) (m2, _) ->
+               flip_compare compare m1 m2)
+      in
+      for i = 0 to List.length terms - 2 do
+        let m, _ = List.nth_exn terms i in
+        let m', _ = List.nth_exn terms (i + 1) in
+        Logs.app (fun msg ->
+            msg "compare mono %a > %a = %d" Mono.pp m Mono.pp m' (compare m m'));
+        assert (compare m m' > 0)
+      done
+
     let terms (p : 'ord t) = Map.to_alist p ~key_order:`Decreasing
 
     let pp : type ord. ord t Fmt.t =
@@ -207,6 +248,7 @@ module Make (Var : VAR) (F : Fld.S) = struct
 
     let reorder ordering : _ t -> 'ord t = Map.map_keys_exn ordering ~f:Fn.id
     let zero = Map.empty
+    let is_zero (p : 'ord t) = Map.is_empty p
 
     let total_deg (p : 'ord t) : int option =
       Map.keys p
@@ -227,13 +269,21 @@ module Make (Var : VAR) (F : Fld.S) = struct
         | `Left x | `Right x -> Some x
         | `Both (x, y) -> if F.(x + y = zero) then None else Some F.(x + y))
 
-    let comparator_of (p : 'ord t) = Map.comparator p |> Comparator.to_module
-    let add_term (p : 'ord t) t = add p (of_terms (comparator_of p) [ t ])
+    let mono_comparator (p : 'ord t) = Map.comparator p |> Comparator.to_module
+
+    (* let compare : 'ord t -> 'ord t -> int =
+       Map.compare_m__t (module struct end) F.compare *)
+
+    (* let sexp_of_t : 'ord t -> Sexp.t =
+       Map.sexp_of_m__t (module Mono) F.sexp_of_t *)
+
+    (* let comparator_fc = Comparator.make ~compare ~sexp_of_t *)
+    let add_term (p : 'ord t) t = add p (of_terms (mono_comparator p) [ t ])
 
     let mul : type ord. ord t -> ord t -> ord t =
      fun (type ord) (p1 : ord t) (p2 : ord t) : ord t ->
       Map.fold p1
-        ~init:(zero (comparator_of p1))
+        ~init:(zero (mono_comparator p1))
         ~f:(fun ~key:m1 ~data:c1 acc ->
           Map.fold p2 ~init:acc ~f:(fun ~key:m2 ~data:c2 acc ->
               let m = Mono.mul m1 m2 in
@@ -246,7 +296,7 @@ module Make (Var : VAR) (F : Fld.S) = struct
                     if F.(c'' = zero) then None else Some c'')))
 
     let mul_term (p : 'ord t) (t : Term.t) : 'ord t =
-      mul p (of_terms (comparator_of p) [ t ])
+      mul p (of_terms (mono_comparator p) [ t ])
 
     let neg p = Map.map p ~f:F.neg
     let sub p1 p2 = add p1 (neg p2)
@@ -269,10 +319,10 @@ module Make (Var : VAR) (F : Fld.S) = struct
     let div (p : 'ord t) (fs : 'ord t list) : 'ord t list * 'ord t =
       let fs = Array.of_list fs in
       let lt_fs = Array.map fs ~f:leading_term in
-      let z = zero (comparator_of p) in
-      let of_terms = of_terms (comparator_of p) in
+      let z = zero (mono_comparator p) in
+      let of_terms = of_terms (mono_comparator p) in
       let rec aux p : 'ord t array * 'ord t =
-        Logs.debug (fun m -> m "aux %a" pp p);
+        (* Logs.debug (fun m -> m "aux %a" pp p); *)
         match terms p with
         | [] -> (Array.init (Array.length fs) ~f:(Fn.const z), z)
         | lt_p :: ps -> (
@@ -288,17 +338,16 @@ module Make (Var : VAR) (F : Fld.S) = struct
                       Term.div lt_p lt_f >>= fun q -> Some (i, q))
             with
             | None ->
-                Logs.debug (fun m ->
-                    m "no f divides %a, move to tail %a" Term.pp lt_p pp p');
+                (* Logs.debug (fun m -> m "remainder %a" Term.pp lt_p); *)
                 let qs, r = aux p' in
                 (qs, r +. lt_p)
             | Some (i, q) ->
                 let f = fs.(i) in
-                Logs.debug (fun m ->
-                    m "f_%d = %a divides %a, q = %a" i pp f Term.pp lt_p Term.pp
-                      q);
-                Logs.debug (fun m -> m "f * q = %a" pp (f *. q));
-                Logs.debug (fun m -> m "p - f * q = %a" pp (p - (f *. q)));
+                (* Logs.debug (fun m ->
+                       m "f_%d = %a divides %a, q = %a" i pp f Term.pp lt_p Term.pp
+                         q);
+                   Logs.debug (fun m -> m "f * q = %a" pp (f *. q));
+                   Logs.debug (fun m -> m "p - f * q = %a" pp (p - (f *. q))); *)
                 let qs, r = aux (p - (f *. q)) in
                 qs.(i) <- qs.(i) +. q;
                 (qs, r))
@@ -309,16 +358,100 @@ module Make (Var : VAR) (F : Fld.S) = struct
     let ( / ) = div
     let ( // ) p t = div p t |> fst
     let ( mod ) p t = div p t |> snd
+
+    let s (f : 'ord t) (g : 'ord t) : 'ord t option =
+      let open Option.Let_syntax in
+      leading_term f >>= fun lm_f ->
+      leading_term g >>= fun lm_g ->
+      let lcm : Term.t = (Mono.lcm (lm_f |> fst) (lm_g |> fst), F.one) in
+      Term.div lcm lm_f >>= fun q_f ->
+      Term.div lcm lm_g >>| fun q_g -> (f *. q_f) - (g *. q_g)
+
+    let rec iter ~f x =
+      let y = f x in
+      match y with None -> x | Some y -> iter ~f y
+
+    let fix x ~f ~stop =
+      iter x ~f:(fun x ->
+          let y = f x in
+          if stop ~x ~y then None else Some y)
+
+    let rec choose_two s =
+      match Set.choose s with
+      | None -> []
+      | Some x ->
+          let s = Set.remove s x in
+          List.map (Set.to_list s) ~f:(fun y -> (x, y)) @ choose_two s
+
+    let rec splits = function
+      | [] -> []
+      | x :: xs ->
+          (x, xs) :: List.map (splits xs) ~f:(fun (y, ys) -> (y, x :: ys))
+
+    let groebner (fs : 'ord t list) : 'ord t list =
+      match fs with
+      | [] -> []
+      | _ :: _ ->
+          let gs =
+            fix (Set.Poly.of_list fs)
+              ~f:(fun gs ->
+                List.fold (choose_two gs) ~init:gs ~f:(fun gs (p, q) ->
+                    match s p q with
+                    | Some s_pq ->
+                        let r = s_pq mod Set.Poly.to_list gs in
+                        if is_zero r then gs
+                        else (
+                          Logs.debug (fun m ->
+                              m "@[<h>s(%a, %a) = %a@]" pp p pp q pp s_pq);
+                          Logs.debug (fun m -> m "Adding r = %a" pp r);
+                          Set.Poly.add gs r)
+                    | None -> gs))
+              ~stop:(fun ~x:fs ~y:gs ->
+                Int.equal (Set.length fs) (Set.length gs))
+          in
+          Set.Poly.to_list gs
+
+    let reduced_groebner (fs : 'ord list) : 'ord list =
+      let gs = groebner fs in
+      gs
+      |> (* rescale all LC to 1 *)
+      List.map ~f:(fun g ->
+          let lc = leading_coeff g |> Option.value_exn in
+          g *. (Mono.one, F.inv lc))
+      |> (* remove redundant polynomials *)
+      fix
+        ~f:(fun gs ->
+          gs
+          |> splits
+          |> List.filter ~f:(fun (g, gs') ->
+                 let lm_g = leading_monomial g |> Option.value_exn in
+                 (* keep if no other LM(g') divides LM(g) *)
+                 not
+                 @@ List.exists gs' ~f:(fun g' ->
+                        let lm_g' = leading_monomial g' |> Option.value_exn in
+                        Option.is_some (Mono.div lm_g lm_g')))
+          |> List.map ~f:fst)
+        ~stop:(fun ~x:gs ~y:gs' -> List.length gs = List.length gs')
   end
 
   (** Polynomial in expression form *)
   module Expr = struct
     type t = Const of F.t | Var of Var.t | Add of t * t | Mul of t * t
 
-    let ( + ) e1 e2 = Add (e1, e2)
-    let ( * ) e1 e2 = Mul (e1, e2)
+    let ( ! ) (v : Var.t) : t = Var v
+    let v = ( ! )
+    let i n = Const (F.of_int n)
+    let f x = Const x
     let zero = Const F.zero
     let one = Const F.one
+    let ( + ) e1 e2 = Add (e1, e2)
+    let ( * ) e1 e2 = Mul (e1, e2)
+    let ( - ) e1 e2 = e1 + (f F.(neg one) * e2)
+
+    let rec pow e n =
+      if n = 0 then one else if n = 1 then e else e * pow e Int.(n - 1)
+
+    let ( ** ) e n = pow e n
 
     let rec pp ppf = function
       | Const c -> F.pp ppf c
@@ -335,9 +468,6 @@ module Make (Var : VAR) (F : Fld.S) = struct
         | Mul (e1, e2) -> Normal.mul (go e1) (go e2)
       in
       go
-
-    let rec pow e n =
-      if n = 0 then one else if n = 1 then e else e * pow e (n - 1)
 
     let of_mono (m : Mono.t) : t =
       let of_var_exp (var, exp) =
@@ -462,7 +592,6 @@ module P = Make (Var) (Fld.Q)
 let () = Logs.set_level (Some Logs.Debug)
 let () = Logs.set_reporter (Logs_fmt.reporter ())
 
-open Logs
 open P
 open Normal
 
@@ -477,7 +606,8 @@ let () =
   let m1 = of_list [ ("x", 3) ] in
   let m2 = of_list [ ("x", 2) ] in
   let m = div m1 m2 |> Option.value_exn in
-  debug (fun mm -> mm "%a / %a = %a \n%!" P.Mono.pp m1 P.Mono.pp m2 P.Mono.pp m);
+  Logs.debug (fun mm ->
+      mm "%a / %a = %a \n%!" P.Mono.pp m1 P.Mono.pp m2 P.Mono.pp m);
   assert (Mono.compare_lex m1 m2 > 0)
 
 let () =
@@ -501,18 +631,18 @@ let () =
       ]
   in
 
-  debug (fun mm -> mm "p = %a\n%!" pp p);
-  debug (fun mm -> mm "p * p = %a\n%!" pp (mul p p));
-  debug (fun mm -> mm "horner (best) : %a\n%!" Expr.pp (Expr.horner p));
-  debug (fun mm ->
+  Logs.debug (fun mm -> mm "p = %a\n%!" pp p);
+  Logs.debug (fun mm -> mm "p * p = %a\n%!" pp (mul p p));
+  Logs.debug (fun mm -> mm "horner (best) : %a\n%!" Expr.pp (Expr.horner p));
+  Logs.debug (fun mm ->
       mm "horner (next) : %a\n%!" Expr.pp
         (Expr.horner ~heuristics:Expr.next_var p))
 
 let () =
   (* x ^ 2 *)
   let p = P.Expr.(Var "x" * Var "x") in
-  debug (fun mm -> mm "p = %a\n%!" P.Expr.pp p);
-  debug (fun mm ->
+  Logs.debug (fun mm -> mm "p = %a\n%!" P.Expr.pp p);
+  Logs.debug (fun mm ->
       mm "normalize p = %a\n%!" P.Expr.pp (P.Expr.normalize P.Mono.lex p))
 
 let () =
@@ -546,11 +676,20 @@ let () =
   (* x y z^5 *)
   let m2 = Mono.of_list [ ("x", 1); ("y", 2); ("z", 1) ] in
   assert (Mono.compare_grlex m1 m2 > 0);
-  (* x5 y1 z1 *)
+  (* x5 y1 z1 > x4 y1 z2 *)
   let m1 = Mono.of_list [ ("x", 5); ("y", 1); ("z", 1) ] in
-  (* x4 y1 z2 *)
   let m2 = Mono.of_list [ ("x", 4); ("y", 1); ("z", 2) ] in
-  assert (Mono.compare_grlex m1 m2 > 0)
+  assert (Mono.compare_grlex m1 m2 > 0);
+  (* x^2 y > y^2 *)
+  assert (
+    Mono.compare_grlex
+      (Mono.of_list [ ("x", 2); ("y", 1) ])
+      (Mono.of_list [ ("y", 2) ])
+    > 0);
+  (* y^2 > x *)
+  assert (
+    Mono.compare_grlex (Mono.of_list [ ("y", 2) ]) (Mono.of_list [ ("x", 1) ])
+    > 0)
 
 let () =
   Logs.debug (fun m -> m "Test grrevlex");
@@ -651,7 +790,67 @@ let () =
   in
   let qs, r = p / [ f0; f1 ] in
   Logs.debug (fun m ->
-      m "%a / %a = %a; %a" pp p pp f0 Fmt.(list ~sep:comma pp) qs pp r)
+      m "%a / (%a) = %a; %a" pp p
+        Fmt.(list ~sep:comma pp)
+        [ f0; f1 ]
+        Fmt.(list ~sep:comma pp)
+        qs pp r);
+  let qs, r = p / [ f1; f0 ] in
+  Logs.debug (fun m ->
+      m "%a / (%a) = %a; %a" pp p
+        Fmt.(list ~sep:comma pp)
+        [ f1; f0 ]
+        Fmt.(list ~sep:comma pp)
+        qs pp r)
+
+let () =
+  Logs.debug (fun m -> m "2.3 exercise 5");
+  (* p = x^3 - x^2y - x^2z + x
+     f1 = x^2y - z
+     f2 = xy - 1
+  *)
+  let p =
+    Expr.(
+      (v "x" ** 3) - ((v "x" ** 2) * v "y") - ((v "x" ** 2) * v "z") + v "x"
+      |> to_nf Mono.grlex)
+  in
+  let f1 = Expr.(((v "x" ** 2) * v "y") - v "z" |> to_nf Mono.grlex) in
+  let f2 = Expr.((Var "x" * Var "y") - i 1 |> to_nf Mono.grlex) in
+  let _, r1 = p / [ f1; f2 ] in
+  Logs.debug (fun m -> m "------------------------------------");
+  let _, r2 = p / [ f2; f1 ] in
+  Logs.debug (fun m -> m "r1 = %a\nr2 = %a\n%!" pp r1 pp r2)
+
+let () =
+  Logs.debug (fun m -> m "Test groebner basis");
+  (* f = x^3y^2 - x^2y^3 + x
+     g = 3x^4y + y^2 *)
+  let f =
+    Expr.(
+      ((v "x" ** 3) * (v "y" ** 2)) - ((v "x" ** 2) * (v "y" ** 3)) + v "x"
+      |> to_nf Mono.grlex)
+  in
+  let g =
+    Expr.((i 3 * (v "x" ** 4) * v "y") + (v "y" ** 2) |> to_nf Mono.grlex)
+  in
+  let s_fg = s f g |> Option.value_exn in
+  Logs.debug (fun m -> m "s(%a, %a) = %a" pp f pp g pp s_fg);
+  (* f1 = x^3 - 2xy, f2 = x^2y - 2y^2 + x *)
+  let f1 = Expr.((v "x" ** 3) - (i 2 * v "x" * v "y") |> to_nf Mono.grlex) in
+  let f2 =
+    Expr.(
+      ((v "x" ** 2) * v "y") - (i 2 * (v "y" ** 2)) + v "x" |> to_nf Mono.grlex)
+  in
+  let gs = groebner [ f1; f2 ] in
+  Logs.debug (fun m ->
+      m "groebner(%a, %a)@\n = %a" pp f1 pp f2
+        Fmt.(vbox @@ list ~sep:(any "@ ` ") pp)
+        gs);
+  let gs = reduced_groebner [ f1; f2 ] in
+  Logs.debug (fun m ->
+      m "reduced_groebner(%a, %a)@\n = %a" pp f1 pp f2
+        Fmt.(vbox @@ list ~sep:(any "@ ` ") pp)
+        gs)
 
 (*
      let () =

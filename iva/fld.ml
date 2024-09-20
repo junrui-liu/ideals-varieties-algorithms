@@ -1,7 +1,7 @@
 open Base
 
 module type S0 = sig
-  type t [@@deriving sexp]
+  type t
 
   val zero : t
   val one : t
@@ -12,6 +12,8 @@ module type S0 = sig
   val equal : t -> t -> bool
   val compare : t -> t -> int
   val pp : t Fmt.t
+  val of_int : int -> t
+  val sexp_of_t : t -> Sexp.t
 end
 
 module type S = sig
@@ -101,6 +103,8 @@ module Fin0 (F : Ff_sig.PRIME_WITH_ROOT_OF_UNITY) = struct
     let z = to_z f in
     let z' = Z.(if z <= F.order / of_int 2 then z else z - F.order) in
     Z.pp ppf z'
+
+  let of_int i = of_z (Z.of_int i)
 end
 
 module Q = struct
