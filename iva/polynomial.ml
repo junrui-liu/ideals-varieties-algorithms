@@ -250,6 +250,11 @@ module Make (Var : VAR) (F : Fld.S) = struct
     let zero = Map.empty
     let is_zero (p : 'ord t) = Map.is_empty p
 
+    let is_const (p : 'ord t) f =
+      Map.length p = 1
+      &&
+      match Map.find p Mono.one with Some f' -> F.equal f f' | None -> false
+
     let total_deg (p : 'ord t) : int option =
       Map.keys p
       |> List.map ~f:Mono.total_deg
@@ -587,6 +592,73 @@ module Var = struct
   include Comparable.Make (T)
 end
 
+module Sat = struct
+  type lit = Pos of Var.t | Neg of Var.t
+  type clause = lit list
+  type t = clause list
+
+  let ( !+ ) x = Pos x
+  let ( !- ) x = Neg x
+
+  module F2 = Fld.Fin (struct
+    let modulus = Z.of_int 2
+  end)
+
+  module P = Make (Var) (F2)
+
+  let pp_lit ppf = function
+    | Pos v -> Fmt.pf ppf "%a" Var.pp v
+    | Neg v -> Fmt.pf ppf "¬%a" Var.pp v
+
+  let pp_clause ppf ls =
+    Fmt.pf ppf "(%a)" Fmt.(hbox @@ list ~sep:(any " ||@ ") pp_lit) ls
+
+  let pp = Fmt.(vbox @@ list ~sep:(any " &&@ ") pp_clause)
+  let neg : P.Expr.t -> P.Expr.t = fun e -> P.Expr.(one - e)
+  let conj : P.Expr.t -> P.Expr.t -> P.Expr.t = fun e1 e2 -> P.Expr.(e1 * e2)
+
+  let disj : P.Expr.t -> P.Expr.t -> P.Expr.t =
+   fun e1 e2 -> neg (conj (neg e1) (neg e2))
+
+  let tt : P.Expr.t = P.Expr.one
+  let ff : P.Expr.t = P.Expr.zero
+
+  let poly_expr_of_lit : lit -> P.Expr.t = function
+    | Pos x -> P.Expr.v x
+    | Neg x -> neg (P.Expr.v x)
+
+  let poly_expr_of_clause : clause -> P.Expr.t =
+   fun c ->
+    c
+    |> List.map ~f:poly_expr_of_lit
+    |> List.reduce ~f:(fun acc e -> disj acc e)
+    |> Option.value ~default:ff
+    |> neg
+  (* since we are asserting each clause must be true, i.e., neg is false *)
+
+  module Ord = P.Mono.GrLex
+
+  type result = Sat | Unsat
+
+  let pp_result ppf = function
+    | Sat -> Fmt.string ppf "Sat"
+    | Unsat -> Fmt.string ppf "Unsat"
+
+  let solve t =
+    List.map t ~f:(fun c ->
+        let e = poly_expr_of_clause c in
+        let p = P.Expr.to_nf P.Mono.grlex e in
+        Logs.debug (fun m ->
+            m "polymial of clause %a = %a = %a" pp_clause c P.Expr.pp e
+              P.Normal.pp p);
+        p)
+    |> P.Normal.reduced_groebner
+    |> fun gs ->
+    Logs.debug (fun m ->
+        m "Reduced groebner basis = {%a}" Fmt.(vbox @@ list P.Normal.pp) gs);
+    match gs with [ p ] when P.Normal.is_const p F2.one -> Unsat | _ -> Sat
+end
+
 module P = Make (Var) (Fld.Q)
 
 let () = Logs.set_level (Some Logs.Debug)
@@ -851,6 +923,18 @@ let () =
       m "reduced_groebner(%a, %a)@\n = %a" pp f1 pp f2
         Fmt.(vbox @@ list ~sep:(any "@ ` ") pp)
         gs)
+
+let () =
+  Logs.debug (fun m -> m "Test sat solver");
+  let t = Sat.[ [ !+"x"; !+"y" ]; [ !-"x"; !+"z" ]; [ !-"y" ] ] in
+  Logs.debug (fun m -> m "CNF: %a" Sat.pp t);
+  let r = Sat.solve t in
+  Logs.debug (fun m -> m "Result = %a" Sat.pp_result r);
+
+  let t = Sat.[ [ !+"x"; !+"y" ]; [ !-"x"; !+"z" ]; [ !-"y" ]; [ !-"z" ] ] in
+  Logs.debug (fun m -> m "CNF: %a" Sat.pp t);
+  let r = Sat.solve t in
+  Logs.debug (fun m -> m "Result = %a" Sat.pp_result r)
 
 (*
      let () =
